@@ -14,18 +14,25 @@ const __dirname = dirname(__filename);
 let serviceAccount;
 try {
   // Only try to load from file in development environment
-  if (process.env.NODE_ENV === 'development') {
+  console.log('Loading credentials from ../..');
+  serviceAccount = JSON.parse(
+    readFileSync(join(__dirname, '../../fbserviceAccountKey-admin.json'), 'utf8')
+  );
+
+
+/*  
+ if (process.env.NODE_ENV === 'development') {
     serviceAccount = JSON.parse(
-      readFileSync(join(__dirname, './firebase-admin-creds.json'), 'utf8')
+      readFileSync(join(__dirname, '../../firebase-admin-creds.json'), 'utf8')
     );
     console.log('Loaded credentials from local file (development mode)');
   } else {
     // In production, we'll use application default credentials
     console.log('Using application default credentials (production mode)');
     serviceAccount = undefined;
-  }
+  } */
 } catch (error) {
-  console.log('Note: No local credentials file found, using default credentials');
+  console.log('Note: credentials found');
   serviceAccount = undefined;
 }
 
@@ -46,6 +53,8 @@ try {
   console.error('Error initializing Firebase Admin:', error);
   throw error;
 }
+
+console.log('line 57');
 
 // Get Firestore instance
 const db = admin.firestore();
