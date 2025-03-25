@@ -10,43 +10,44 @@ import functions from '@google-cloud/functions-framework';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Configure credentials
+// Determine if running locally or in the cloud
+const isLocalExecution = process.argv[1] === fileURLToPath(import.meta.url);
+console.log(`Running in ${isLocalExecution ? 'local' : 'cloud'} mode`);
+
+// Configure credentials based on environment
 let serviceAccount;
 try {
-  // Only try to load from file in development environment
-  console.log('Loading credentials from ../..');
-  serviceAccount = JSON.parse(
-    readFileSync(join(__dirname, '../../fbserviceAccountKey-admin.json'), 'utf8')
-  );
-
-
-/*  
- if (process.env.NODE_ENV === 'development') {
-    serviceAccount = JSON.parse(
-      readFileSync(join(__dirname, '../../firebase-admin-creds.json'), 'utf8')
-    );
-    console.log('Loaded credentials from local file (development mode)');
+  if (isLocalExecution) {
+    // Only try to load from file in local environment
+    const credentialsPath = join(__dirname, '../../fbserviceAccountKey-admin.json');
+    console.log(`Loading credentials from local file: ${credentialsPath}`);
+    serviceAccount = JSON.parse(readFileSync(credentialsPath, 'utf8'));
+    console.log('Credentials loaded successfully from file');
   } else {
-    // In production, we'll use application default credentials
-    console.log('Using application default credentials (production mode)');
+    // In cloud environment, we'll use application default credentials
+    console.log('Cloud environment detected, using application default credentials');
     serviceAccount = undefined;
-  } */
+  }
 } catch (error) {
-  console.log('Note: credentials found');
+  console.error('Error loading credentials:', error.message);
+  console.log('Falling back to application default credentials');
   serviceAccount = undefined;
 }
 
+
 // Initialize Firebase Admin SDK
+let firebaseApp;
 try {
   // Use cert if we have explicit credentials, otherwise use applicationDefault
   if (serviceAccount) {
-    admin.initializeApp({
+    // Initialize without a name to make it the default app
+    firebaseApp = admin.initializeApp({
       credential: admin.credential.cert(serviceAccount)
-    }, 'admin-app');
+    });
     console.log('Initialized Firebase Admin with explicit credentials');
   } else {
     // When deployed to Cloud Functions, use application default credentials
-    admin.initializeApp();
+    firebaseApp = admin.initializeApp();
     console.log('Initialized Firebase Admin with application default credentials');
   }
 } catch (error) {
@@ -54,9 +55,7 @@ try {
   throw error;
 }
 
-console.log('line 57');
-
-// Get Firestore instance
+// Get Firestore instance from the initialized app
 const db = admin.firestore();
 
 // Store data function
@@ -135,50 +134,54 @@ function parseEmailData(emailText) {
   };
 }
 
+// Process function used by both cloud and local execution
+async function processRequest(inputData) {
+  let jsonData;
+  
+  // STEP 1: Process the email/input to JSON
+  if (typeof inputData === 'string' && inputData.includes('New task posted:')) {
+    // Parse email data into proper JSON structure
+    jsonData = parseEmailData(inputData);
+  } else {
+    // Use the JSON data as provided
+    jsonData = inputData;
+  }
+  
+  // Validate JSON structure
+  if (!jsonData.customerRequest || !jsonData.customerContext) {
+    throw new Error('Invalid JSON structure');
+  }
+
+  // STEP 2: Store in Firebase
+  // Prepare data structure for Firestore
+  const dataToStore = {
+    type: 'EMAIL_PROCESSED',
+    inputData: jsonData,
+    timestamp: new Date().toISOString(),
+    processed: true
+  };
+  
+  // Store in Firebase
+  const docRef = await storeDataInFirebase(dataToStore);
+  
+  return {
+    success: true,
+    message: "Email processed and data stored in Firebase successfully",
+    requestId: docRef.id,
+    parsedData: jsonData
+  };
+}
+
 // Register the HTTP function with the Functions Framework
 functions.http('processEmailAndStoreInFirebase', async (req, res) => {
   try {
-    console.log("Combined email processing and Firebase storage request received");
+    console.log("Cloud function request received");
     
-    let jsonData;
-    
-    // STEP 1: Process the email/input to JSON
-    if (typeof req.body === 'string' && req.body.includes('New task posted:')) {
-      // Parse email data into proper JSON structure
-      jsonData = parseEmailData(req.body);
-    } else {
-      // Use the JSON data as provided
-      jsonData = req.body;
-    }
-    
-    // Validate JSON structure
-    if (!jsonData.customerRequest || !jsonData.customerContext) {
-      res.status(400).send('Invalid JSON structure');
-      return;
-    }
-
-    // STEP 2: Store in Firebase
-    // Prepare data structure for Firestore
-    const dataToStore = {
-      type: 'EMAIL_PROCESSED',
-      inputData: jsonData,
-      timestamp: new Date().toISOString(),
-      processed: true
-    };
-    
-    // Store in Firebase
-    const docRef = await storeDataInFirebase(dataToStore);
-    
-    // STEP 3: Return response
-    res.status(200).json({
-      success: true,
-      message: "Email processed and data stored in Firebase successfully",
-      requestId: docRef.id,
-      parsedData: jsonData
-    });
+    const result = await processRequest(req.body);
+    res.status(200).json(result);
     
   } catch (error) {
-    console.error("Error in combined function:", error);
+    console.error("Error in cloud function:", error);
     res.status(500).json({
       success: false,
       message: "Error processing request",
@@ -188,7 +191,54 @@ functions.http('processEmailAndStoreInFirebase', async (req, res) => {
 });
 
 // For local testing
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  console.log("Starting local test...");
-  // Add test code here if needed
+if (isLocalExecution) {
+  const runLocalTest = async () => {
+    try {
+      console.log("Starting local test...");
+      
+      // Sample email data for testing
+      const testEmailData = `New task posted: **2023-05-15T14:30:00**
+      
+**Type: Title: Fix leaky faucet, Description: The bathroom sink is leaking, Address: 123 Main St, New York, NY 10001, Due: 2023-05-20, Budget: $150**
+
+Please respond if you're interested in taking this task.`;
+      
+      // Process the test data
+      const result = await processRequest(testEmailData);
+      console.log("Local test result:", JSON.stringify(result, null, 2));
+      
+      // Alternatively, test with JSON data
+      const testJsonData = {
+        customerRequest: {
+          customerId: "test-customer-123",
+          requestType: "task_creation",
+          productId: "Test Task",
+          urgency: "high",
+          preferredLanguage: "en-US"
+        },
+        customerContext: {
+          loyaltyTier: "premium",
+          previousInteractions: 5,
+          taskData: {
+            details: {
+              title: "Test Task",
+              description: "This is a test task",
+              address: "123 Test St, Test City, Test State",
+              dueDate: "2023-06-01",
+              budget: 200
+            }
+          }
+        }
+      };
+      
+      console.log("\nTesting with JSON data:");
+      const jsonResult = await processRequest(testJsonData);
+      console.log("JSON test result:", JSON.stringify(jsonResult, null, 2));
+      
+    } catch (error) {
+      console.error("Error in local test:", error);
+    }
+  };
+  
+  runLocalTest().then(() => console.log("Local testing complete"));
 }
